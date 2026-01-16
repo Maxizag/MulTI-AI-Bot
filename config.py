@@ -1,14 +1,27 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+import os
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# Админы (безлимитный доступ)
+# --- Читаем админов из .env ---
+admin_ids_str = os.getenv("ADMIN_IDS", "")
+
+# Превращаем строку "123,456" в список чисел [123, 456]
+# Конструкция проверяет, чтобы id был числом, чтобы код не упал от ошибки
 ADMIN_IDS = [
-    5004470817,  # Твой ID - замени на свой!
+    int(x.strip()) 
+    for x in admin_ids_str.split(",") 
+    if x.strip().isdigit()
 ]
+
+# Если список пуст, можно добавить заглушку или вывести предупреждение
+if not ADMIN_IDS:
+    print("⚠️ Внимание: Список админов пуст! Проверь .env")
+
+# ... остальной код ...
 
 # API ключи
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
