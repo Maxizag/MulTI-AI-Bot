@@ -37,16 +37,28 @@ DATABASE_URL = "sqlite+aiosqlite:///./ai_bot.db"
 DAILY_LIMIT = 5  # Запросов в день для бесплатных юзеров
 
 MODELS = {
+    "mimo": {
+        "id": "xiaomi/mimo-v2-flash:free",
+        "name": "🆓 Xiaomi Mimo",
+        "description": "Быстрая бесплатная модель от Xiaomi",
+        "free": True
+    },
     "chimera": {
         "id": "tngtech/deepseek-r1t2-chimera:free",
         "name": "🆓 DeepSeek Chimera",
-        "description": "Бесплатная быстрая модель",
+        "description": "Бесплатная reasoning модель",
+        "free": True
+    },
+    "devstral": {
+        "id": "mistralai/devstral-2512:free",
+        "name": "🆓 Devstral",
+        "description": "Бесплатная модель Mistral для кода",
         "free": True
     },
     "gemini": {
         "id": "google/gemini-2.5-flash",
         "name": "⚡ Gemini 2.5 Flash",
-        "description": "Быстрая и дешевая",
+        "description": "Быстрая и дешевая ($0.003)",
         "free": False
     },
     "claude": {
