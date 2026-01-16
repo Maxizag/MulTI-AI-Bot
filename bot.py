@@ -331,14 +331,7 @@ async def handle_message(message: Message):
             model_used=model_key
         )
         
-        await message.answer(
-            f"{response_text}\n\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🤖 {model_name}\n"
-            f"💰 Токены: {tokens}\n"
-            f"⏳ Осталось запросов: {remaining}\n"
-            f"💬 История: {len(history)//2} сообщений"
-        )
+        await message.answer(response_text)
     else:
         # Ошибка
         error = result["error"]

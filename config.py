@@ -36,12 +36,11 @@ DATABASE_URL = "sqlite+aiosqlite:///./ai_bot.db"
 # Лимиты
 DAILY_LIMIT = 5  # Запросов в день для бесплатных юзеров
 
-# Модели
 MODELS = {
-    "deepseek": {
-        "id": "deepseek/deepseek-r1-0528:free",
-        "name": "🆓 DeepSeek R1",
-        "description": "Бесплатная reasoning модель",
+    "chimera": {
+        "id": "tngtech/deepseek-r1t2-chimera:free",
+        "name": "🆓 DeepSeek Chimera",
+        "description": "Бесплатная быстрая модель",
         "free": True
     },
     "gemini": {

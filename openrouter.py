@@ -1,10 +1,11 @@
 from openai import OpenAI
 from config import OPENROUTER_API_KEY, MODELS
 
-# Инициализация клиента
+# Инициализация клиента с timeout
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
+    timeout=60.0  # 60 секунд максимум
 )
 
 
@@ -53,9 +54,17 @@ async def send_message(model_key: str, messages: list) -> dict:
             max_tokens=2000,
         )
         
-        # Извлекаем ответ
+        # Извлекаем ответ с проверкой
+        if not response.choices or not response.choices[0].message.content:
+            return {
+                "success": False,
+                "response": None,
+                "tokens": None,
+                "error": "Модель вернула пустой ответ (возможно таймаут)"
+            }
+        
         answer = response.choices[0].message.content
-        tokens_used = response.usage.total_tokens
+        tokens_used = response.usage.total_tokens if response.usage else 0
         
         return {
             "success": True,
