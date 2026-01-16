@@ -2,6 +2,7 @@ print("🔍 Начинаю загрузку bot.py...")
 
 import asyncio
 import logging
+import re  # ← ДОБАВИЛ СЮДА
 print("✅ asyncio и logging загружены")
 
 from aiogram import Bot, Dispatcher, F
@@ -19,7 +20,7 @@ from database import (
     init_db, get_or_create_user, check_and_update_limit, 
     update_selected_model, get_user_info,
     save_message, get_conversation_history, clear_conversation_history,
-    create_new_session, get_user_sessions, switch_session, get_current_session  # Новые функции
+    create_new_session, get_user_sessions, switch_session, get_current_session
 )
 print("✅ database загружен")
 
@@ -34,6 +35,24 @@ logging.basicConfig(level=logging.INFO)
 # Инициализация бота
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
+
+
+# ← ФУНКЦИЯ ВЫНЕСЕНА СЮДА (после импортов, до обработчиков)
+def markdown_to_html(text: str) -> str:
+    """Конвертирует Markdown в HTML для Telegram"""
+    # ### Заголовок → <b>Заголовок</b>
+    text = re.sub(r'###\s*(.+)', r'<b>\1</b>', text)
+    
+    # **жирный** → <b>жирный</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    
+    # *курсив* → <i>курсив</i>
+    text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+    
+    # `код` → <code>код</code>
+    text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
+    
+    return text
 
 
 # Клавиатура с выбором модели
@@ -156,7 +175,8 @@ async def cmd_id(message: Message):
         parse_mode="Markdown"
     )
 
-    # Команда /new - создать новый чат
+
+# Команда /new - создать новый чат
 @dp.message(Command("new"))
 async def cmd_new_chat(message: Message):
     # Создаем новый чат
@@ -191,7 +211,7 @@ async def cmd_list_chats(message: Message):
         buttons.append([
             InlineKeyboardButton(
                 text=f"{emoji}{title}",
-                callback_data=f"chat_{session.session_id[:8]}"  # Первые 8 символов UUID
+                callback_data=f"chat_{session.session_id[:8]}"
             )
         ])
     
@@ -236,7 +256,8 @@ async def callback_model_select(callback: CallbackQuery):
         reply_markup=None
     )
 
-    # Обработка переключения чатов
+
+# Обработка переключения чатов
 @dp.callback_query(F.data.startswith("chat_"))
 async def callback_chat_select(callback: CallbackQuery):
     action = callback.data.split("_")[1]
@@ -252,7 +273,6 @@ async def callback_chat_select(callback: CallbackQuery):
         return
     
     # Переключение на существующий чат
-    # Получаем полный session_id из базы (action это первые 8 символов)
     sessions = await get_user_sessions(callback.from_user.id)
     selected_session = None
     
@@ -306,6 +326,7 @@ async def handle_message(message: Message):
     
     # Получаем историю диалога (последние 5 пар сообщений)
     history = await get_conversation_history(message.from_user.id, limit=5)
+    
     # ОТЛАДКА: Смотрим что в истории
     print(f"🔍 История для юзера {message.from_user.id}:")
     print(f"📝 Количество сообщений в истории: {len(history)}")
@@ -331,7 +352,36 @@ async def handle_message(message: Message):
             model_used=model_key
         )
         
-        await message.answer(response_text)
+        # Конвертируем markdown в HTML
+        response_text = markdown_to_html(response_text)
+        
+        # Разбиваем длинные сообщения на части
+        MAX_MESSAGE_LENGTH = 4096
+
+        if len(response_text) <= MAX_MESSAGE_LENGTH:
+            await message.answer(response_text, parse_mode="HTML")
+        else:
+            # Разбиваем на части по 4000 символов (с запасом)
+            parts = []
+            while len(response_text) > 0:
+                if len(response_text) <= MAX_MESSAGE_LENGTH:
+                    parts.append(response_text)
+                    break
+                
+                # Ищем последний перенос строки в пределах лимита
+                split_pos = response_text.rfind('\n', 0, MAX_MESSAGE_LENGTH)
+                if split_pos == -1:
+                    split_pos = MAX_MESSAGE_LENGTH
+                
+                parts.append(response_text[:split_pos])
+                response_text = response_text[split_pos:].lstrip()
+            
+            # Отправляем по частям
+            for i, part in enumerate(parts, 1):
+                if len(parts) > 1:
+                    await message.answer(f"📄 Часть {i}/{len(parts)}:\n\n{part}", parse_mode="HTML")
+                else:
+                    await message.answer(part, parse_mode="HTML")
     else:
         # Ошибка
         error = result["error"]
