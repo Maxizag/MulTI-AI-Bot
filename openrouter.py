@@ -51,7 +51,7 @@ async def send_message(model_key: str, messages: list) -> dict:
             },
             model=model_id,
             messages=messages,  # Теперь передаем весь массив!
-            max_tokens=2000,
+            max_tokens=8192,  # ← УВЕЛИЧИЛ С 2000 ДО 8192 для длинных ответов
         )
         
         # Извлекаем ответ с проверкой
