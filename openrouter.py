@@ -1,5 +1,8 @@
 from openai import OpenAI
 from config import OPENROUTER_API_KEY, MODELS
+import time
+from pricing import calculate_cost, estimate_tokens, format_cost, is_free_model
+
 
 # Инициализация клиента с timeout
 client = OpenAI(
@@ -7,7 +10,6 @@ client = OpenAI(
     api_key=OPENROUTER_API_KEY,
     timeout=60.0  # 60 секунд максимум
 )
-
 
 async def send_message(model_key: str, messages: list) -> dict:
     """
@@ -20,6 +22,9 @@ async def send_message(model_key: str, messages: list) -> dict:
         "success": bool,
         "response": str или None,
         "tokens": int или None,
+        "input_tokens": int или None,  # НОВОЕ
+        "output_tokens": int или None,  # НОВОЕ
+        "response_time": float или None,  # НОВОЕ
         "error": str или None
     }
     """
@@ -30,6 +35,9 @@ async def send_message(model_key: str, messages: list) -> dict:
                 "success": False,
                 "response": None,
                 "tokens": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "response_time": None,
                 "error": "Неизвестная модель"
             }
         
@@ -43,6 +51,9 @@ async def send_message(model_key: str, messages: list) -> dict:
             print(f"  {i+1}. [{msg['role']}]: {msg['content'][:80]}...")
         print(f"{'='*60}\n")
         
+        # Засекаем время
+        start_time = time.time()
+        
         # Отправляем запрос с полной историей
         response = client.chat.completions.create(
             extra_headers={
@@ -50,9 +61,12 @@ async def send_message(model_key: str, messages: list) -> dict:
                 "X-Title": "AI Multi Bot",
             },
             model=model_id,
-            messages=messages,  # Теперь передаем весь массив!
-            max_tokens=8192,  # ← УВЕЛИЧИЛ С 2000 ДО 8192 для длинных ответов
+            messages=messages,
+            max_tokens=8192,
         )
+        
+        # Считаем время ответа
+        response_time = time.time() - start_time
         
         # Извлекаем ответ с проверкой
         if not response.choices or not response.choices[0].message.content:
@@ -60,16 +74,39 @@ async def send_message(model_key: str, messages: list) -> dict:
                 "success": False,
                 "response": None,
                 "tokens": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "response_time": response_time,
                 "error": "Модель вернула пустой ответ (возможно таймаут)"
             }
         
         answer = response.choices[0].message.content
-        tokens_used = response.usage.total_tokens if response.usage else 0
+        
+        # Извлекаем метрики токенов
+        if response.usage:
+            total_tokens = response.usage.total_tokens
+            input_tokens = response.usage.prompt_tokens if hasattr(response.usage, 'prompt_tokens') else 0
+            output_tokens = response.usage.completion_tokens if hasattr(response.usage, 'completion_tokens') else 0
+            
+            # Если input/output не разделены - делаем примерную оценку
+            if input_tokens == 0 and output_tokens == 0:
+                # Примерно 70% на input, 30% на output
+                input_tokens = int(total_tokens * 0.7)
+                output_tokens = int(total_tokens * 0.3)
+        else:
+            total_tokens = 0
+            input_tokens = 0
+            output_tokens = 0
+        
+        print(f"✅ Ответ получен за {response_time:.1f}с | Токены: {total_tokens} (in: {input_tokens}, out: {output_tokens})")
         
         return {
             "success": True,
             "response": answer,
-            "tokens": tokens_used,
+            "tokens": total_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "response_time": response_time,
             "error": None
         }
         
@@ -81,6 +118,9 @@ async def send_message(model_key: str, messages: list) -> dict:
             "success": False,
             "response": None,
             "tokens": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "response_time": None,
             "error": error_msg
         }
 

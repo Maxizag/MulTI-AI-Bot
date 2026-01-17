@@ -2,7 +2,9 @@ print("🔍 Начинаю загрузку bot.py...")
 
 import asyncio
 import logging
-import re  # ← ДОБАВИЛ СЮДА
+import re
+import html
+import time
 print("✅ asyncio и logging загружены")
 
 from aiogram import Bot, Dispatcher, F
@@ -16,11 +18,21 @@ print("✅ aiogram types загружены")
 from config import TELEGRAM_BOT_TOKEN, MODELS, DAILY_LIMIT
 print("✅ config загружен")
 
+from pricing import calculate_cost, estimate_tokens, format_cost, is_free_model
+print("✅ pricing загружен")
+
 from database import (
     init_db, get_or_create_user, check_and_update_limit, 
     update_selected_model, get_user_info,
     save_message, get_conversation_history, clear_conversation_history,
-    create_new_session, get_user_sessions, switch_session, get_current_session
+    create_new_session, get_user_sessions, switch_session, get_current_session,
+    # Этап 1
+    rename_session, delete_session, auto_title_session,
+    save_previous_session, set_system_prompt, clear_system_prompt, 
+    get_system_prompt,
+    async_session, ChatSession, Message as DBMessage,
+    # Этап 2 - новые функции
+    check_token_limit, update_token_usage, get_user_stats, check_model_access
 )
 print("✅ database загружен")
 
@@ -37,20 +49,35 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
 
-# ← ФУНКЦИЯ ВЫНЕСЕНА СЮДА (после импортов, до обработчиков)
 def markdown_to_html(text: str) -> str:
-    """Конвертирует Markdown в HTML для Telegram"""
-    # ### Заголовок → <b>Заголовок</b>
-    text = re.sub(r'###\s*(.+)', r'<b>\1</b>', text)
+    """Конвертирует Markdown в HTML для Telegram с экранированием"""
     
-    # **жирный** → <b>жирный</b>
+    # 1. Сначала экранируем все HTML спецсимволы
+    text = html.escape(text)
+    
+    # 2. Обрабатываем блоки кода (```код```)
+    text = re.sub(
+        r'```(\w*)\n(.*?)```',
+        r'<pre><code class="\1">\2</code></pre>',
+        text,
+        flags=re.DOTALL
+    )
+    
+    # 3. Инлайн код (`код`)
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+    
+    # 4. Жирный текст (**текст** или __текст__)
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
     
-    # *курсив* → <i>курсив</i>
+    # 5. Курсив (*текст* или _текст_)
     text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+    text = re.sub(r'_(.+?)_', r'<i>\1</i>', text)
     
-    # `код` → <code>код</code>
-    text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
+    # 6. Заголовки (### Заголовок)
+    text = re.sub(r'###\s*(.+)', r'<b>\1</b>', text)
+    text = re.sub(r'##\s*(.+)', r'<b>\1</b>', text)
+    text = re.sub(r'#\s*(.+)', r'<b>\1</b>', text)
     
     return text
 
@@ -86,15 +113,23 @@ async def cmd_start(message: Message):
     
     welcome_text += (
         f"\n🎯 Выбери модель ниже, потом просто пиши свои вопросы!\n"
-        f"📊 Лимит: {DAILY_LIMIT} запросов в день\n"
         f"💬 Все модели видят историю диалога!\n\n"
         f"Команды:\n"
         f"/start - главное меню\n"
         f"/model - сменить модель\n"
-        f"/stats - статистика\n"
-        f"/clear - очистить историю текущего чата\n"
+        f"/stats - статистика\n\n"
+        f"💬 Чаты:\n"
         f"/new - создать новый чат\n"
-        f"/chats - переключиться между чатами\n"
+        f"/chats - список чатов\n"
+        f"/rename [название] - переименовать\n"
+        f"/back - предыдущий чат\n"
+        f"/clear - очистить историю\n\n"
+        f"🤖 Запросы:\n"
+        f"/ask [модель] [вопрос] - разовый запрос\n\n"
+        f"⚙️ Настройки:\n"
+        f"/system [текст] - системный промпт\n"
+        f"/system_show - показать промпт\n"
+        f"/system_clear - удалить промпт\n\n"
         f"/id - узнать свой ID"
     )
     
@@ -119,36 +154,47 @@ async def cmd_model(message: Message):
 # Команда /stats - статистика
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
-    from config import ADMIN_IDS
+    stats = await get_user_stats(message.from_user.id)
     
-    user = await get_user_info(message.from_user.id)
-    
-    if not user:
+    if not stats:
         await message.answer("❌ Пользователь не найден. Используй /start")
         return
     
-    current_model = get_model_name(user.selected_model)
-    is_admin = message.from_user.id in ADMIN_IDS
+    current_model = get_model_name(stats["selected_model"])
     
-    if is_admin:
+    # Форматируем прогресс-бар токенов
+    used = stats["tokens_used"]
+    limit = stats["tokens_limit"]
+    remaining = stats["tokens_remaining"]
+    
+    percentage = (used / limit * 100) if limit > 0 else 0
+    bar_length = 10
+    filled = int(bar_length * percentage / 100)
+    bar = "█" * filled + "░" * (bar_length - filled)
+    
+    if stats["is_admin"]:
         stats_text = (
-            f"📊 Твоя статистика:\n\n"
-            f"👑 Статус: АДМИН (безлимит)\n"
-            f"🤖 Текущая модель: {current_model}\n"
-            f"📝 Запросов сегодня: {user.requests_today}\n"
-            f"📅 Зарегистрирован: {user.created_at.strftime('%d.%m.%Y')}"
+            f"📊 <b>Твоя статистика</b>\n\n"
+            f"👑 Статус: <b>АДМИН</b> (безлимит)\n"
+            f"🤖 Модель: {current_model}\n\n"
+            f"📝 Токенов использовано: {used:,}\n"
+            f"💰 Всего потрачено: {format_cost(stats['total_spent'])}\n"
+            f"📅 Зарегистрирован: {stats['created_at'].strftime('%d.%m.%Y')}"
         )
     else:
-        remaining = DAILY_LIMIT - user.requests_today
         stats_text = (
-            f"📊 Твоя статистика:\n\n"
-            f"🤖 Текущая модель: {current_model}\n"
-            f"📝 Запросов сегодня: {user.requests_today}/{DAILY_LIMIT}\n"
-            f"⏳ Осталось: {remaining}\n"
-            f"📅 Зарегистрирован: {user.created_at.strftime('%d.%m.%Y')}"
+            f"📊 <b>Твоя статистика</b>\n\n"
+            f"🎯 Тариф: <b>{stats['tier_name']}</b>\n"
+            f"🤖 Модель: {current_model}\n\n"
+            f"📝 Токены в этом месяце:\n"
+            f"   {bar} {percentage:.0f}%\n"
+            f"   Использовано: {used:,} / {limit:,}\n"
+            f"   Осталось: <b>{remaining:,}</b>\n\n"
+            f"💰 Потрачено: {format_cost(stats['total_spent'])}\n"
+            f"📅 С нами: {stats['created_at'].strftime('%d.%m.%Y')}"
         )
     
-    await message.answer(stats_text)
+    await message.answer(stats_text, parse_mode="HTML")
 
 
 # Команда /clear - очистка истории
@@ -179,7 +225,6 @@ async def cmd_id(message: Message):
 # Команда /new - создать новый чат
 @dp.message(Command("new"))
 async def cmd_new_chat(message: Message):
-    # Создаем новый чат
     session_id = await create_new_session(message.from_user.id, "Новый чат")
     
     await message.answer(
@@ -199,23 +244,23 @@ async def cmd_list_chats(message: Message):
         await message.answer("У тебя пока нет чатов. Напиши что-нибудь для создания первого!")
         return
     
-    # Формируем список чатов
     buttons = []
     for session in sessions:
         is_current = current_session and session.session_id == current_session.session_id
         emoji = "✅ " if is_current else "💬 "
-        
-        # Берем первые 30 символов названия
         title = session.title[:30]
         
         buttons.append([
             InlineKeyboardButton(
                 text=f"{emoji}{title}",
                 callback_data=f"chat_{session.session_id[:8]}"
+            ),
+            InlineKeyboardButton(
+                text="🗑",
+                callback_data=f"chat_delete_{session.session_id[:8]}"
             )
         ])
     
-    # Кнопка "Новый чат"
     buttons.append([
         InlineKeyboardButton(
             text="➕ Создать новый чат",
@@ -228,10 +273,246 @@ async def cmd_list_chats(message: Message):
     await message.answer(
         f"💬 Твои чаты ({len(sessions)}):\n\n"
         f"✅ - активный чат\n"
-        f"💬 - другие чаты\n\n"
+        f"💬 - другие чаты\n"
+        f"🗑 - удалить чат\n\n"
         f"Выбери чат для переключения:",
         reply_markup=keyboard
     )
+
+
+# Команда /rename - переименовать чат
+@dp.message(Command("rename"))
+async def cmd_rename_chat(message: Message):
+    args = message.text.split(maxsplit=1)
+    
+    if len(args) < 2:
+        await message.answer(
+            "❌ Использование: /rename [новое название]\n\n"
+            "Пример: /rename Работа с Python"
+        )
+        return
+    
+    new_title = args[1].strip()
+    
+    if len(new_title) < 1:
+        await message.answer("❌ Название не может быть пустым")
+        return
+    
+    success = await rename_session(message.from_user.id, new_title)
+    
+    if success:
+        await message.answer(f"✅ Чат переименован в: {new_title}")
+    else:
+        await message.answer("❌ Не удалось переименовать чат")
+
+
+# Команда /system - установить системный промпт
+@dp.message(Command("system"))
+async def cmd_system_prompt(message: Message):
+    args = message.text.split(maxsplit=1)
+    
+    if len(args) < 2:
+        await message.answer(
+            "❌ Использование: /system [текст промпта]\n\n"
+            "Пример: /system Ты опытный Python разработчик. Отвечай кратко с примерами кода.\n\n"
+            "Другие команды:\n"
+            "/system_show - показать текущий промпт\n"
+            "/system_clear - удалить промпт"
+        )
+        return
+    
+    prompt = args[1].strip()
+    success = await set_system_prompt(message.from_user.id, prompt)
+    
+    if success:
+        await message.answer(
+            f"✅ Системный промпт установлен!\n\n"
+            f"Теперь все модели будут использовать этот промпт:\n\n"
+            f"<i>{prompt[:200]}{'...' if len(prompt) > 200 else ''}</i>",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer("❌ Не удалось установить промпт")
+
+
+# Команда /system_show - показать промпт
+@dp.message(Command("system_show"))
+async def cmd_system_show(message: Message):
+    prompt = await get_system_prompt(message.from_user.id)
+    
+    if prompt:
+        await message.answer(
+            f"📋 Твой системный промпт:\n\n"
+            f"<i>{prompt}</i>",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            "❌ У тебя нет системного промпта\n\n"
+            "Установи его командой:\n"
+            "/system [текст]"
+        )
+
+
+# Команда /system_clear - очистить промпт
+@dp.message(Command("system_clear"))
+async def cmd_system_clear(message: Message):
+    success = await clear_system_prompt(message.from_user.id)
+    
+    if success:
+        await message.answer("✅ Системный промпт удален")
+    else:
+        await message.answer("❌ Не удалось удалить промпт")
+
+
+# Команда /back - вернуться к предыдущему чату
+@dp.message(Command("back"))
+async def cmd_back_chat(message: Message):
+    user = await get_user_info(message.from_user.id)
+    
+    if not user or not user.previous_session_id:
+        await message.answer("❌ Нет предыдущего чата для возврата")
+        return
+    
+    async with async_session() as session:
+        from sqlalchemy import select
+        
+        result = await session.execute(
+            select(ChatSession).where(ChatSession.session_id == user.previous_session_id)
+        )
+        prev_chat = result.scalar_one_or_none()
+    
+    if not prev_chat:
+        await message.answer("❌ Предыдущий чат не найден")
+        return
+    
+    await save_previous_session(message.from_user.id, user.current_session_id)
+    await switch_session(message.from_user.id, user.previous_session_id)
+    
+    await message.answer(f"⬅️ Вернулись к чату: {prev_chat.title}")
+
+
+# Команда /ask - разовый запрос к модели
+@dp.message(Command("ask"))
+async def cmd_ask_model(message: Message):
+    args = message.text.split(maxsplit=2)
+    
+    if len(args) < 3:
+        await message.answer(
+            "❌ Использование: /ask [модель] [вопрос]\n\n"
+            "Доступные модели:\n"
+            "• gpt4, gpt - GPT-4o\n"
+            "• claude - Claude Sonnet 4.5\n"
+            "• gemini - Gemini 2.5 Flash\n"
+            "• mimo - Xiaomi Mimo (бесплатная)\n"
+            "• chimera, deepseek - DeepSeek (бесплатная)\n"
+            "• devstral - Devstral (бесплатная)\n\n"
+            "Пример: /ask gpt4 напиши функцию для парсинга JSON"
+        )
+        return
+    
+    model_alias = args[1].lower()
+    question = args[2]
+    
+    MODEL_ALIASES = {
+        "gpt4": "gpt4",
+        "gpt": "gpt4",
+        "claude": "claude",
+        "gemini": "gemini",
+        "mimo": "mimo",
+        "chimera": "chimera",
+        "deepseek": "chimera",
+        "devstral": "devstral"
+    }
+    
+    if model_alias not in MODEL_ALIASES:
+        await message.answer(
+            f"❌ Неизвестная модель: {model_alias}\n\n"
+            "Используй: gpt4, claude, gemini, mimo, chimera, devstral"
+        )
+        return
+    
+    model_key = MODEL_ALIASES[model_alias]
+    
+    # Проверка доступа к модели
+    has_access, error_msg = await check_model_access(message.from_user.id, model_key)
+    if not has_access:
+        await message.answer(
+            f"{error_msg}\n\n"
+            f"Доступные модели на твоем тарифе можешь посмотреть в /model"
+        )
+        return
+    
+    # Проверка лимита токенов
+    estimated_tokens = estimate_tokens(question)
+    can_request, remaining, tier = await check_token_limit(
+        message.from_user.id,
+        estimated_tokens
+    )
+    
+    if not can_request:
+        from config import SUBSCRIPTION_TIERS
+        tier_info = SUBSCRIPTION_TIERS.get(tier, SUBSCRIPTION_TIERS["free"])
+        
+        await message.answer(
+            f"❌ <b>Месячный лимит токенов исчерпан!</b>\n\n"
+            f"Твой тариф: {tier_info['name']}\n"
+            f"Попробуй в начале следующего месяца",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Получаем системный промпт
+    system_prompt = await get_system_prompt(message.from_user.id)
+    
+    messages = []
+    if system_prompt:
+        messages.append({
+            "role": "system",
+            "content": system_prompt
+        })
+    
+    messages.append({
+        "role": "user",
+        "content": question
+    })
+    
+    model_name = get_model_name(model_key)
+    await bot.send_chat_action(message.chat.id, "typing")
+    
+    result = await send_message(model_key, messages)
+    
+    if result["success"]:
+        response_text = result["response"]
+        tokens = result["tokens"]
+        input_tokens = result.get("input_tokens", 0)
+        output_tokens = result.get("output_tokens", 0)
+        response_time = result.get("response_time", 0)
+        
+        # Подсчет стоимости и обновление токенов
+        cost = calculate_cost(model_key, input_tokens, output_tokens)
+        await update_token_usage(message.from_user.id, tokens, cost)
+        
+        response_text = markdown_to_html(response_text)
+        
+        # Добавляем метрику
+        is_free = is_free_model(model_key)
+        if is_free:
+            footer = f"\n\n<i>🤖 {model_name} • 💰 {tokens:,} токенов • ⏱ {response_time:.1f}с</i>"
+        else:
+            footer = f"\n\n<i>🤖 {model_name} • 💰 {tokens:,} токенов • 💵 {format_cost(cost)} • ⏱ {response_time:.1f}с</i>"
+        
+        try:
+            await message.answer(response_text + footer, parse_mode="HTML")
+        except Exception as e:
+            print(f"⚠️ Ошибка HTML парсинга: {e}")
+            await message.answer(result["response"] + f"\n\n🤖 {model_name} • 💰 {tokens:,} токенов")
+    else:
+        error = result["error"]
+        await message.answer(
+            f"❌ Ошибка при запросе к {model_name}:\n\n"
+            f"{error}"
+        )
 
 
 # Обработка выбора модели
@@ -243,7 +524,6 @@ async def callback_model_select(callback: CallbackQuery):
         await callback.answer("❌ Неизвестная модель", show_alert=True)
         return
     
-    # Обновляем модель в БД
     await update_selected_model(callback.from_user.id, model_key)
     
     model_info = MODELS[model_key]
@@ -257,12 +537,12 @@ async def callback_model_select(callback: CallbackQuery):
     )
 
 
-# Обработка переключения чатов
+# Обработка переключения и удаления чатов
 @dp.callback_query(F.data.startswith("chat_"))
 async def callback_chat_select(callback: CallbackQuery):
-    action = callback.data.split("_")[1]
+    parts = callback.data.split("_")
+    action = parts[1]
     
-    # Создание нового чата
     if action == "new":
         session_id = await create_new_session(callback.from_user.id, "Новый чат")
         await callback.answer("✨ Новый чат создан!", show_alert=False)
@@ -270,6 +550,70 @@ async def callback_chat_select(callback: CallbackQuery):
             "✨ Создан новый чат!\n\n"
             "Это твой активный чат. Можешь начинать диалог!"
         )
+        return
+    
+    if action == "delete":
+        session_id_prefix = parts[2]
+        
+        sessions = await get_user_sessions(callback.from_user.id)
+        selected_session = None
+        
+        for session in sessions:
+            if session.session_id.startswith(session_id_prefix):
+                selected_session = session
+                break
+        
+        if not selected_session:
+            await callback.answer("❌ Чат не найден", show_alert=True)
+            return
+        
+        success, message_text = await delete_session(
+            callback.from_user.id,
+            selected_session.session_id
+        )
+        
+        if success:
+            await callback.answer("✅ Чат удален", show_alert=False)
+            
+            sessions = await get_user_sessions(callback.from_user.id)
+            current_session = await get_current_session(callback.from_user.id)
+            
+            buttons = []
+            for session in sessions:
+                is_current = current_session and session.session_id == current_session.session_id
+                emoji = "✅ " if is_current else "💬 "
+                title = session.title[:30]
+                
+                buttons.append([
+                    InlineKeyboardButton(
+                        text=f"{emoji}{title}",
+                        callback_data=f"chat_{session.session_id[:8]}"
+                    ),
+                    InlineKeyboardButton(
+                        text="🗑",
+                        callback_data=f"chat_delete_{session.session_id[:8]}"
+                    )
+                ])
+            
+            buttons.append([
+                InlineKeyboardButton(
+                    text="➕ Создать новый чат",
+                    callback_data="chat_new"
+                )
+            ])
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+            
+            await callback.message.edit_text(
+                f"💬 Твои чаты ({len(sessions)}):\n\n"
+                f"✅ - активный чат\n"
+                f"💬 - другие чаты\n\n"
+                f"Выбери чат для переключения:",
+                reply_markup=keyboard
+            )
+        else:
+            await callback.answer(f"❌ {message_text}", show_alert=True)
+        
         return
     
     # Переключение на существующий чат
@@ -285,7 +629,7 @@ async def callback_chat_select(callback: CallbackQuery):
         await callback.answer("❌ Чат не найден", show_alert=True)
         return
     
-    # Переключаемся
+    await save_previous_session(callback.from_user.id, selected_session.session_id)
     await switch_session(callback.from_user.id, selected_session.session_id)
     await callback.answer(f"✅ Переключено на {selected_session.title}", show_alert=False)
     
@@ -295,20 +639,9 @@ async def callback_chat_select(callback: CallbackQuery):
     )
 
 
-# Обработка текстовых сообщений (вопросы к AI)
+# Обработка текстовых сообщений
 @dp.message(F.text)
 async def handle_message(message: Message):
-    # Проверяем лимит
-    can_request, remaining = await check_and_update_limit(message.from_user.id)
-    
-    if not can_request:
-        await message.answer(
-            f"❌ Дневной лимит исчерпан!\n\n"
-            f"Попробуй завтра или подожди до полуночи UTC 🌙"
-        )
-        return
-    
-    # Получаем выбранную модель
     user = await get_user_info(message.from_user.id)
     if not user:
         await message.answer("❌ Используй /start для начала работы")
@@ -317,34 +650,76 @@ async def handle_message(message: Message):
     model_key = user.selected_model
     model_name = get_model_name(model_key)
     
-    # Сохраняем сообщение юзера в историю
+    # Проверка доступа к модели
+    has_access, error_msg = await check_model_access(message.from_user.id, model_key)
+    if not has_access:
+        await message.answer(
+            f"{error_msg}\n\n"
+            f"Измени модель через /model или обнови тариф"
+        )
+        return
+    
+    # Проверка лимита токенов
+    estimated_tokens = estimate_tokens(message.text)
+    can_request, remaining, tier = await check_token_limit(
+        message.from_user.id,
+        estimated_tokens
+    )
+    
+    if not can_request:
+        from config import SUBSCRIPTION_TIERS
+        tier_info = SUBSCRIPTION_TIERS.get(tier, SUBSCRIPTION_TIERS["free"])
+        
+        await message.answer(
+            f"❌ <b>Месячный лимит токенов исчерпан!</b>\n\n"
+            f"Твой тариф: {tier_info['name']}\n"
+            f"Лимит: {tier_info['monthly_tokens']:,} токенов/месяц\n\n"
+            f"💡 Что можно сделать:\n"
+            f"• Подожди до начала следующего месяца\n"
+            f"• Используй бесплатные модели (если доступны)\n"
+            f"• Обнови тариф (скоро)",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Сохраняем сообщение юзера
     await save_message(
         telegram_id=message.from_user.id,
         role="user",
         content=message.text
     )
     
-    # Получаем историю диалога (последние 5 пар сообщений)
+    # Автоназвание чата
+    await auto_title_session(message.from_user.id, message.text)
+    
+    # Получаем историю
     history = await get_conversation_history(message.from_user.id, limit=5)
     
-    # ОТЛАДКА: Смотрим что в истории
-    print(f"🔍 История для юзера {message.from_user.id}:")
-    print(f"📝 Количество сообщений в истории: {len(history)}")
-    for i, msg in enumerate(history):
-        print(f"  {i+1}. {msg['role']}: {msg['content'][:50]}...")
+    # Добавляем системный промпт
+    system_prompt = await get_system_prompt(message.from_user.id)
+    if system_prompt:
+        history.insert(0, {
+            "role": "system",
+            "content": system_prompt
+        })
     
-    # Показываем что бот печатает
     await bot.send_chat_action(message.chat.id, "typing")
     
-    # Отправляем запрос в OpenRouter с историей
+    # Отправляем запрос
     result = await send_message(model_key, history)
     
     if result["success"]:
-        # Успешный ответ
         response_text = result["response"]
         tokens = result["tokens"]
+        input_tokens = result.get("input_tokens", 0)
+        output_tokens = result.get("output_tokens", 0)
+        response_time = result.get("response_time", 0)
         
-        # Сохраняем ответ AI в историю
+        # Подсчет стоимости
+        cost = calculate_cost(model_key, input_tokens, output_tokens)
+        await update_token_usage(message.from_user.id, tokens, cost)
+        
+        # Сохраняем ответ AI
         await save_message(
             telegram_id=message.from_user.id,
             role="assistant",
@@ -352,23 +727,53 @@ async def handle_message(message: Message):
             model_used=model_key
         )
         
-        # Конвертируем markdown в HTML
+        # Обновляем метрики последнего сообщения
+        async with async_session() as session:
+            from sqlalchemy import select, desc
+            result_msg = await session.execute(
+                select(DBMessage)
+                .where(
+                    DBMessage.telegram_id == message.from_user.id,
+                    DBMessage.role == "assistant"
+                )
+                .order_by(desc(DBMessage.created_at))
+                .limit(1)
+            )
+            last_message = result_msg.scalar_one_or_none()
+            
+            if last_message:
+                last_message.tokens_used = tokens
+                last_message.input_tokens = input_tokens
+                last_message.output_tokens = output_tokens
+                last_message.cost_usd = cost
+                last_message.response_time = response_time
+                await session.commit()
+        
+        # Форматируем ответ
         response_text = markdown_to_html(response_text)
         
-        # Разбиваем длинные сообщения на части
-        MAX_MESSAGE_LENGTH = 4096
-
-        if len(response_text) <= MAX_MESSAGE_LENGTH:
-            await message.answer(response_text, parse_mode="HTML")
+        is_free = is_free_model(model_key)
+        if is_free:
+            footer = f"\n\n<i>🤖 {model_name} • 💰 {tokens:,} токенов • ⏱ {response_time:.1f}с</i>"
         else:
-            # Разбиваем на части по 4000 символов (с запасом)
+            footer = f"\n\n<i>🤖 {model_name} • 💰 {tokens:,} токенов • 💵 {format_cost(cost)} • ⏱ {response_time:.1f}с</i>"
+        
+        MAX_MESSAGE_LENGTH = 4096
+        
+        if len(response_text) <= MAX_MESSAGE_LENGTH - len(footer):
+            try:
+                await message.answer(response_text + footer, parse_mode="HTML")
+            except Exception as e:
+                print(f"⚠️ Ошибка HTML парсинга: {e}")
+                await message.answer(result["response"] + f"\n\n🤖 {model_name} • 💰 {tokens:,} токенов")
+        else:
+            # Разбиваем на части
             parts = []
             while len(response_text) > 0:
                 if len(response_text) <= MAX_MESSAGE_LENGTH:
                     parts.append(response_text)
                     break
                 
-                # Ищем последний перенос строки в пределах лимита
                 split_pos = response_text.rfind('\n', 0, MAX_MESSAGE_LENGTH)
                 if split_pos == -1:
                     split_pos = MAX_MESSAGE_LENGTH
@@ -376,14 +781,16 @@ async def handle_message(message: Message):
                 parts.append(response_text[:split_pos])
                 response_text = response_text[split_pos:].lstrip()
             
-            # Отправляем по частям
             for i, part in enumerate(parts, 1):
-                if len(parts) > 1:
-                    await message.answer(f"📄 Часть {i}/{len(parts)}:\n\n{part}", parse_mode="HTML")
-                else:
-                    await message.answer(part, parse_mode="HTML")
+                try:
+                    if i == len(parts):
+                        await message.answer(f"📄 Часть {i}/{len(parts)}:\n\n{part}{footer}", parse_mode="HTML")
+                    else:
+                        await message.answer(f"📄 Часть {i}/{len(parts)}:\n\n{part}", parse_mode="HTML")
+                except Exception as e:
+                    print(f"⚠️ Ошибка HTML парсинга в части {i}: {e}")
+                    await message.answer(f"📄 Часть {i}/{len(parts)}:\n\n{result['response']}")
     else:
-        # Ошибка
         error = result["error"]
         await message.answer(
             f"❌ Ошибка при запросе к AI:\n\n"
@@ -395,11 +802,7 @@ async def handle_message(message: Message):
 # Главная функция
 async def main():
     print("🚀 Запуск бота...")
-    
-    # Инициализация БД
     await init_db()
-    
-    # Запуск бота
     print("✅ Бот запущен и готов к работе!")
     await dp.start_polling(bot)
 
