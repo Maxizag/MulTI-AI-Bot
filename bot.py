@@ -781,15 +781,38 @@ async def handle_message(message: Message):
                 parts.append(response_text[:split_pos])
                 response_text = response_text[split_pos:].lstrip()
             
-            for i, part in enumerate(parts, 1):
-                try:
-                    if i == len(parts):
-                        await message.answer(f"📄 Часть {i}/{len(parts)}:\n\n{part}{footer}", parse_mode="HTML")
-                    else:
-                        await message.answer(f"📄 Часть {i}/{len(parts)}:\n\n{part}", parse_mode="HTML")
-                except Exception as e:
-                    print(f"⚠️ Ошибка HTML парсинга в части {i}: {e}")
-                    await message.answer(f"📄 Часть {i}/{len(parts)}:\n\n{result['response']}")
+    # Отправляем по частям
+    for i, part in enumerate(parts, 1):
+        try:
+            if i == len(parts):
+                await message.answer(f"📄 Часть {i}/{len(parts)}:\n\n{part}{footer}", parse_mode="HTML")
+            else:
+                await message.answer(f"📄 Часть {i}/{len(parts)}:\n\n{part}", parse_mode="HTML")
+        except Exception as e:
+            print(f"⚠️ Ошибка при отправке части {i}: {e}")
+            # Пробуем отправить без HTML парсинга
+            try:
+                # Берем оригинальную часть из исходного ответа (не HTML)
+                original_parts = []
+                temp_text = result["response"]
+                while len(temp_text) > 0:
+                    if len(temp_text) <= MAX_MESSAGE_LENGTH:
+                        original_parts.append(temp_text)
+                        break
+                    split_pos = temp_text.rfind('\n', 0, MAX_MESSAGE_LENGTH)
+                    if split_pos == -1:
+                        split_pos = MAX_MESSAGE_LENGTH
+                    original_parts.append(temp_text[:split_pos])
+                    temp_text = temp_text[split_pos:].lstrip()
+                
+                # Отправляем соответствующую часть
+                if i <= len(original_parts):
+                    await message.answer(f"📄 Часть {i}/{len(parts)}:\n\n{original_parts[i-1]}")
+                else:
+                    await message.answer(f"⚠️ Ошибка отправки части {i}")
+            except Exception as e2:
+                print(f"❌ Критическая ошибка части {i}: {e2}")
+                await message.answer(f"❌ Не удалось отправить часть {i}/{len(parts)}")
     else:
         error = result["error"]
         await message.answer(
