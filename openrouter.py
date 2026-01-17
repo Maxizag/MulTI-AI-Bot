@@ -62,7 +62,7 @@ async def send_message(model_key: str, messages: list) -> dict:
             },
             model=model_id,
             messages=messages,
-            max_tokens=8192,
+            max_tokens=16384,
         )
         
         # Считаем время ответа
